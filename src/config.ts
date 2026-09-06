@@ -17,6 +17,14 @@ const DEFAULT_CONFIG: Config = {
   },
 };
 
+const configFromEnv = process.env.SUPAWAKE_CONFIG;
+
+if (configFromEnv) {
+
+  return JSON.parse(configFromEnv);
+
+}
+
 export function ensureConfigDir(): void {
   if (!fs.existsSync(CONFIG_DIR)) {
     fs.mkdirSync(CONFIG_DIR, { recursive: true });
