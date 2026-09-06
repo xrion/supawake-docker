@@ -1,134 +1,57 @@
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
+function loadConfigFromEnvironment(): Config | null {
+  const projects: Project[] = [];
 
-import { Config, Project } from './types';
+  for (let i = 1; ; i++) {
+    const url = process.env[`SUPABASE_${i}_URL`];
+    const anonKey = process.env[`SUPABASE_${i}_KEY`];
 
-export const CONFIG_DIR = path.join(os.homedir(), '.config', 'supawake');
+    if (!url && !anonKey) {
+      // On continue à chercher les éventuels indices suivants.
+      // Cela permet d'avoir par exemple 1, 2 et 5.
+      const hasLaterProject = Object.keys(process.env).some(
+        (key) =>
+          /^SUPABASE_\d+_(URL|KEY|NAME)$/.test(key) &&
+          Number(key.split('_')[1]) > i
+      );
 
-export const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
+      if (!hasLaterProject) {
+        break;
+      }
 
-const DEFAULT_CONFIG: Config = {
-  projects: [],
-  settings: {
-    defaultInterval: '0 0 */3 * *',
-    notifications: {
-      enabled: false,
-      webhookUrl: '',
-    },
-  },
-};
+      continue;
+    }
 
-export function ensureConfigDir(): void {
-  if (!fs.existsSync(CONFIG_DIR)) {
-    fs.mkdirSync(CONFIG_DIR, { recursive: true });
-  }
-}
-
-export function loadConfig(): Config {
-  /*
-   * Docker / Coolify mode:
-   *
-   * If SUPAWAKE_CONFIG is defined, use it instead of the
-   * persistent local config file.
-   *
-   * This allows the entire configuration to be provided
-   * securely as a Coolify environment variable.
-   */
-  const envConfig = process.env.SUPAWAKE_CONFIG;
-
-  if (envConfig) {
-    try {
-      const parsed = JSON.parse(envConfig) as Partial<Config>;
-
-      return {
-        projects: parsed.projects ?? [],
-        settings: {
-          ...DEFAULT_CONFIG.settings,
-          ...(parsed.settings ?? {}),
-          notifications: {
-            ...DEFAULT_CONFIG.settings.notifications,
-            ...(parsed.settings?.notifications ?? {}),
-          },
-        },
-      };
-    } catch (err) {
+    if (!url || !anonKey) {
       throw new Error(
-        `Failed to parse SUPAWAKE_CONFIG: ${(err as Error).message}`,
+        `Incomplete configuration for SUPABASE_${i}. ` +
+        `Both SUPABASE_${i}_URL and SUPABASE_${i}_KEY are required.`
       );
     }
+
+    const name =
+      process.env[`SUPABASE_${i}_NAME`] ||
+      `supabase-${i}`;
+
+    projects.push({
+      name,
+      url,
+      anonKey,
+    });
   }
 
-  /*
-   * Normal CLI mode:
-   * fall back to ~/.config/supawake/config.json
-   */
-  ensureConfigDir();
-
-  if (!fs.existsSync(CONFIG_PATH)) {
-    saveConfig(DEFAULT_CONFIG);
-    return { ...DEFAULT_CONFIG };
+  if (projects.length === 0) {
+    return null;
   }
 
-  try {
-    const raw = fs.readFileSync(CONFIG_PATH, 'utf8');
-
-    const parsed = JSON.parse(raw) as Partial<Config>;
-
-    return {
-      projects: parsed.projects ?? [],
-      settings: {
-        ...DEFAULT_CONFIG.settings,
-        ...(parsed.settings ?? {}),
-        notifications: {
-          ...DEFAULT_CONFIG.settings.notifications,
-          ...(parsed.settings?.notifications ?? {}),
-        },
+  return {
+    projects,
+    settings: {
+      defaultInterval:
+        process.env.SUPAWAKE_INTERVAL || '0 3 */2 * *',
+      notifications: {
+        enabled: false,
+        webhookUrl: '',
       },
-    };
-  } catch (err) {
-    throw new Error(
-      `Failed to parse config at ${CONFIG_PATH}: ${(err as Error).message}`,
-    );
-  }
-}
-
-export function saveConfig(config: Config): void {
-  ensureConfigDir();
-
-  fs.writeFileSync(
-    CONFIG_PATH,
-    JSON.stringify(config, null, 2) + '\n',
-    'utf8',
-  );
-}
-
-export function addProject(project: Project): Config {
-  const config = loadConfig();
-
-  if (config.projects.some((p) => p.name === project.name)) {
-    throw new Error(`A project named "${project.name}" already exists.`);
-  }
-
-  config.projects.push(project);
-
-  saveConfig(config);
-
-  return config;
-}
-
-export function removeProject(name: string): Config {
-  const config = loadConfig();
-
-  const before = config.projects.length;
-
-  config.projects = config.projects.filter((p) => p.name !== name);
-
-  if (config.projects.length === before) {
-    throw new Error(`No project named "${name}" found.`);
-  }
-
-  saveConfig(config);
-
-  return config;
+    },
+  };
 }
