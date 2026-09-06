@@ -32,6 +32,8 @@ export interface PingResult {
   ok: boolean;
   status?: number;
   error?: string;
+  /** Message the server sent back with a failing status, when it sent one. */
+  detail?: string;
   durationMs: number;
   /** How many requests were sent, including retries. 1 means it worked first try. */
   attempts: number;

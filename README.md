@@ -63,7 +63,7 @@ For each project with a `table` configured, `supawake` sends an HTTP `GET` to:
 https://<your-ref>.supabase.co/rest/v1/<table>?select=*&limit=1
 ```
 
-…with your anon key in the `apikey` and `Authorization: Bearer …` headers. A **200** response means the project is alive. Anything else is reported as a failure. An empty result (`[]`) still counts as success — the query ran, which is the whole point.
+…with your key in the `apikey` header (legacy anon JWTs are additionally sent as `Authorization: Bearer …`; see [API keys](#api-keys)). A **200** response means the project is alive. Anything else is reported as a failure. An empty result (`[]`) still counts as success — the query ran, which is the whole point.
 
 **Why a table read specifically.** Supabase pauses free-tier projects based on *database* inactivity. This request goes through PostgREST to Postgres, which evaluates your row-level security policies inside the database — real activity that resets the timer. Endpoints like `/auth/v1/health` return a 200 without ever querying Postgres, so pinging them produces a green check while the database still pauses.
 
@@ -124,6 +124,55 @@ Configuration lives at `~/.config/supawake/config.json`:
 }
 ```
 
+### Environment variables (Docker / Coolify)
+
+When `SUPABASE_1_URL` and `SUPABASE_1_KEY` are present, supawake reads its
+projects from the environment instead of the config file — no volume needed.
+Number the projects from 1 upwards:
+
+```bash
+SUPABASE_1_NAME=discoursparfait          # optional, defaults to supabase-1
+SUPABASE_1_URL=https://xxxxx.supabase.co
+SUPABASE_1_KEY=eyJ...                    # anon public key, or sb_publishable_...
+SUPABASE_1_TABLE=keepalive               # anon-readable table to select from
+
+SUPABASE_2_NAME=project2
+SUPABASE_2_URL=https://yyyyy.supabase.co
+SUPABASE_2_KEY=eyJ...
+SUPABASE_2_TABLE=keepalive
+```
+
+| Variable | Description |
+|---|---|
+| `SUPABASE_<n>_NAME` | Label shown in the output. Defaults to `supabase-<n>` |
+| `SUPABASE_<n>_URL` | Project URL. **Required** |
+| `SUPABASE_<n>_KEY` | Anon public key or publishable key. **Required** |
+| `SUPABASE_<n>_TABLE` | Table to read on each ping. Without it the ping falls back to the auth health check and **will not** prevent auto-pause |
+| `SUPAWAKE_TABLE` | Table for every project that has no `SUPABASE_<n>_TABLE` of its own |
+| `SUPAWAKE_INTERVAL` | Cron schedule used by `supawake start` |
+
+**`SUPABASE_<n>_TABLE` is what keeps the database awake.** Omit it and every
+ping stops at the auth endpoint, which answers `200` without ever reaching
+Postgres — the run looks green while the project still pauses. Create the
+[keepalive table](#setting-up-a-keepalive-table) and point this at it.
+
+Values are trimmed, and a pair of surrounding quotes is stripped, because
+container platforms often store them that way. A key carrying a stray quote or
+newline is rejected by Supabase with a `401` that looks exactly like a wrong
+key.
+
+### API keys
+
+Supabase issues two kinds of key, and they are sent differently:
+
+- **Legacy anon keys** (`eyJ...`) are JWTs, sent in both the `apikey` and
+  `Authorization: Bearer` headers.
+- **New publishable keys** (`sb_publishable_...`) are opaque, not JWTs. They go
+  in `apikey` only — sending one as a bearer token returns `401`.
+
+supawake picks the right form from the key itself, so either kind just works.
+Use the *anon public* / *publishable* key, never `service_role`.
+
 ### Notifications (optional)
 
 Set `notifications.enabled` to `true` and provide a `webhookUrl` (Slack-compatible) to receive a simple `{ text: "…" }` POST whenever one or more pings fail.
@@ -182,6 +231,26 @@ Scripts:
 - `npm run dev` — watch mode
 - `npm run lint` — ESLint
 - `npm run format` — Prettier
+
+## Troubleshooting
+
+**`✗ FAIL … HTTP 401`** — the key was rejected. Check that it is the project's
+*anon public* (or publishable) key and not `service_role` or a key from another
+project, and that no quotes or trailing newline crept into the value. supawake
+prints the message Supabase returned alongside the status.
+
+**`✓ OK … — auth only, DB not pinged`** — the project has no table configured,
+so the ping never reached Postgres and the database will still pause. Set
+`SUPABASE_<n>_TABLE` (or `"table"` in the config file) to an anon-readable
+table.
+
+**`HTTP 404 … PGRST205`** — the table name does not exist. PostgREST answers
+from its schema cache without touching the database, so this never counts as
+activity. Create the table and confirm the name.
+
+**`HTTP 403`** — the table exists but row-level security denies `anon` the
+`select`. Add the policy from
+[Setting up a keepalive table](#setting-up-a-keepalive-table).
 
 ## License
 

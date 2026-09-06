@@ -32,6 +32,73 @@ interface Attempt {
   ok: boolean;
   status?: number;
   error?: string;
+  detail?: string;
+}
+
+/**
+ * PostgREST and GoTrue both answer failures with a small JSON body naming the
+ * real cause. Surfacing it turns an opaque "HTTP 401" into something the
+ * operator can act on.
+ */
+async function readFailureDetail(res: Response): Promise<string | undefined> {
+  try {
+    const body = (await res.text()).trim();
+
+    if (!body) {
+      return undefined;
+    }
+
+    try {
+      const parsed = JSON.parse(body) as {
+        message?: string;
+        msg?: string;
+        error?: string;
+        hint?: string;
+        code?: string;
+      };
+
+      const message =
+        parsed.message ?? parsed.msg ?? parsed.error ?? parsed.hint;
+
+      if (message) {
+        return parsed.code ? `${parsed.code}: ${message}` : message;
+      }
+    } catch {
+      /* Not JSON - fall through to the raw body. */
+    }
+
+    return body.slice(0, 200);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Turn a failing status into the concrete thing to go and fix.
+ */
+export function explainStatus(
+  status: number | undefined,
+  project: Project,
+): string | undefined {
+  if (status === 401) {
+    return isPublishableKey(project.anonKey)
+      ? 'the publishable key was rejected - check it belongs to this project and has not been revoked'
+      : 'the key was rejected - a legacy anon key must be the project\'s "anon public" JWT, not the service_role or a stale key';
+  }
+
+  if (status === 403) {
+    return project.table
+      ? `anon may not select from "${project.table}" - grant it a row-level security select policy`
+      : 'the project refused the request';
+  }
+
+  if (status === 404) {
+    return project.table
+      ? `table "${project.table}" was not found - create it, or fix SUPABASE_n_TABLE`
+      : 'the endpoint was not found - check the project URL';
+  }
+
+  return undefined;
 }
 
 /**
@@ -108,9 +175,17 @@ async function attemptPing(
       signal: controller.signal,
     });
 
+    if (res.status === 200) {
+      return {
+        ok: true,
+        status: res.status,
+      };
+    }
+
     return {
-      ok: res.status === 200,
+      ok: false,
       status: res.status,
+      detail: await readFailureDetail(res),
     };
   } catch (err) {
     return {

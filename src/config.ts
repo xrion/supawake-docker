@@ -20,6 +20,27 @@ const DEFAULT_CONFIG: Config = {
 };
 
 /**
+ * Read an environment variable, tolerating the way container platforms
+ * often store values.
+ *
+ * Coolify, docker-compose and .env files frequently keep the surrounding
+ * quotes or a trailing newline as part of the value. An anon key carrying a
+ * stray quote is rejected by Supabase with HTTP 401, which looks exactly
+ * like a wrong key, so strip that noise before it reaches a header.
+ */
+function readEnvironmentValue(name: string): string | undefined {
+  const raw = process.env[name];
+
+  if (raw === undefined) {
+    return undefined;
+  }
+
+  const trimmed = raw.trim().replace(/^(['"])([\s\S]*)\1$/, '$2').trim();
+
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
  * Load Supabase projects from environment variables.
  *
  * Example:
@@ -27,10 +48,16 @@ const DEFAULT_CONFIG: Config = {
  * SUPABASE_1_NAME=discoursparfait
  * SUPABASE_1_URL=https://xxxxx.supabase.co
  * SUPABASE_1_KEY=eyJ...
+ * SUPABASE_1_TABLE=keepalive
  *
  * SUPABASE_2_NAME=project2
  * SUPABASE_2_URL=https://yyyyy.supabase.co
  * SUPABASE_2_KEY=eyJ...
+ *
+ * SUPABASE_n_TABLE names an anon-readable table to select from. Without it
+ * the ping falls back to the auth health endpoint, which answers without
+ * touching Postgres and therefore does NOT prevent free-tier auto-pause.
+ * SUPAWAKE_TABLE sets the table for every project that has no explicit one.
  *
  * This is particularly useful when running Supawake
  * inside Docker / Coolify.
@@ -40,9 +67,11 @@ function loadConfigFromEnvironment(): Config | null {
 
   const environmentKeys = Object.keys(process.env);
 
+  const defaultTable = readEnvironmentValue('SUPAWAKE_TABLE');
+
   const projectNumbers = environmentKeys
     .map((key) => {
-      const match = key.match(/^SUPABASE_(\d+)_(NAME|URL|KEY)$/);
+      const match = key.match(/^SUPABASE_(\d+)_(NAME|URL|KEY|TABLE)$/);
 
       if (!match) {
         return null;
@@ -58,12 +87,16 @@ function loadConfigFromEnvironment(): Config | null {
 
   for (const projectNumber of uniqueProjectNumbers) {
     const name =
-      process.env[`SUPABASE_${projectNumber}_NAME`] ||
+      readEnvironmentValue(`SUPABASE_${projectNumber}_NAME`) ||
       `supabase-${projectNumber}`;
 
-    const url = process.env[`SUPABASE_${projectNumber}_URL`];
+    const url = readEnvironmentValue(`SUPABASE_${projectNumber}_URL`);
 
-    const anonKey = process.env[`SUPABASE_${projectNumber}_KEY`];
+    const anonKey = readEnvironmentValue(`SUPABASE_${projectNumber}_KEY`);
+
+    const table =
+      readEnvironmentValue(`SUPABASE_${projectNumber}_TABLE`) ??
+      defaultTable;
 
     if (!url || !anonKey) {
       throw new Error(
@@ -77,6 +110,7 @@ function loadConfigFromEnvironment(): Config | null {
       name,
       url,
       anonKey,
+      ...(table ? { table } : {}),
     });
   }
 
@@ -88,7 +122,7 @@ function loadConfigFromEnvironment(): Config | null {
     projects,
     settings: {
       defaultInterval:
-        process.env.SUPAWAKE_INTERVAL ||
+        readEnvironmentValue('SUPAWAKE_INTERVAL') ||
         DEFAULT_CONFIG.settings.defaultInterval,
 
       notifications: {
