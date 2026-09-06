@@ -1,9 +1,11 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+
 import { Config, Project } from './types';
 
 export const CONFIG_DIR = path.join(os.homedir(), '.config', 'supawake');
+
 export const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
 
 const DEFAULT_CONFIG: Config = {
@@ -17,14 +19,6 @@ const DEFAULT_CONFIG: Config = {
   },
 };
 
-const configFromEnv = process.env.SUPAWAKE_CONFIG;
-
-if (configFromEnv) {
-
-  return JSON.parse(configFromEnv);
-
-}
-
 export function ensureConfigDir(): void {
   if (!fs.existsSync(CONFIG_DIR)) {
     fs.mkdirSync(CONFIG_DIR, { recursive: true });
@@ -32,14 +26,55 @@ export function ensureConfigDir(): void {
 }
 
 export function loadConfig(): Config {
+  /*
+   * Docker / Coolify mode:
+   *
+   * If SUPAWAKE_CONFIG is defined, use it instead of the
+   * persistent local config file.
+   *
+   * This allows the entire configuration to be provided
+   * securely as a Coolify environment variable.
+   */
+  const envConfig = process.env.SUPAWAKE_CONFIG;
+
+  if (envConfig) {
+    try {
+      const parsed = JSON.parse(envConfig) as Partial<Config>;
+
+      return {
+        projects: parsed.projects ?? [],
+        settings: {
+          ...DEFAULT_CONFIG.settings,
+          ...(parsed.settings ?? {}),
+          notifications: {
+            ...DEFAULT_CONFIG.settings.notifications,
+            ...(parsed.settings?.notifications ?? {}),
+          },
+        },
+      };
+    } catch (err) {
+      throw new Error(
+        `Failed to parse SUPAWAKE_CONFIG: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  /*
+   * Normal CLI mode:
+   * fall back to ~/.config/supawake/config.json
+   */
   ensureConfigDir();
+
   if (!fs.existsSync(CONFIG_PATH)) {
     saveConfig(DEFAULT_CONFIG);
     return { ...DEFAULT_CONFIG };
   }
+
   try {
     const raw = fs.readFileSync(CONFIG_PATH, 'utf8');
+
     const parsed = JSON.parse(raw) as Partial<Config>;
+
     return {
       projects: parsed.projects ?? [],
       settings: {
@@ -60,26 +95,40 @@ export function loadConfig(): Config {
 
 export function saveConfig(config: Config): void {
   ensureConfigDir();
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n', 'utf8');
+
+  fs.writeFileSync(
+    CONFIG_PATH,
+    JSON.stringify(config, null, 2) + '\n',
+    'utf8',
+  );
 }
 
 export function addProject(project: Project): Config {
   const config = loadConfig();
+
   if (config.projects.some((p) => p.name === project.name)) {
     throw new Error(`A project named "${project.name}" already exists.`);
   }
+
   config.projects.push(project);
+
   saveConfig(config);
+
   return config;
 }
 
 export function removeProject(name: string): Config {
   const config = loadConfig();
+
   const before = config.projects.length;
+
   config.projects = config.projects.filter((p) => p.name !== name);
+
   if (config.projects.length === before) {
     throw new Error(`No project named "${name}" found.`);
   }
+
   saveConfig(config);
+
   return config;
 }
