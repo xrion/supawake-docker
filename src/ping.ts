@@ -94,8 +94,20 @@ export function explainStatus(
 
   if (status === 404) {
     return project.table
-      ? `table "${project.table}" was not found - create it, or fix SUPABASE_n_TABLE`
+      ? `table "${project.table}" was not found - create it, or fix SUPABASE_n_TABLE. ` +
+          'If you just created it, reload the PostgREST schema cache with ' +
+          "notify pgrst, 'reload schema';"
       : 'the endpoint was not found - check the project URL';
+  }
+
+  if (status === 400) {
+    return project.table
+      ? `PostgREST rejected the query against "${project.table}" - check the table name and that the public schema is exposed`
+      : 'the request was rejected - check the project URL';
+  }
+
+  if (status !== undefined && status >= 500) {
+    return 'Supabase answered with a server error - the project may be paused, restoring, or over its limits; check the dashboard';
   }
 
   return undefined;
@@ -175,7 +187,16 @@ async function attemptPing(
       signal: controller.signal,
     });
 
-    if (res.status === 200) {
+    /*
+     * Any 2xx means the request reached PostgREST and the query ran.
+     *
+     * It must NOT be narrowed to 200: PostgREST answers a range-limited read
+     * such as "?select=*&limit=1" with 206 Partial Content whenever the page
+     * it returned may not be the whole collection. A keepalive table pinged
+     * with limit=1 hits that case, so a strict 200 check reports a perfectly
+     * healthy database as a failure.
+     */
+    if (res.ok) {
       return {
         ok: true,
         status: res.status,

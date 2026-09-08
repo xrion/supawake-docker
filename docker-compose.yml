@@ -1,0 +1,17 @@
+services:
+  supawake:
+    build: .
+    restart: unless-stopped
+    environment:
+      # One block per Supabase project, numbered from 1 upwards.
+      SUPABASE_1_NAME: ${SUPABASE_1_NAME:-supabase-1}
+      SUPABASE_1_URL: ${SUPABASE_1_URL}
+      SUPABASE_1_KEY: ${SUPABASE_1_KEY}
+      # Required to actually keep the database awake: an anon-readable table.
+      SUPABASE_1_TABLE: ${SUPABASE_1_TABLE:-keepalive}
+
+      # Cron schedule for "supawake start". Every 3 days at midnight UTC.
+      SUPAWAKE_INTERVAL: ${SUPAWAKE_INTERVAL:-0 0 */3 * *}
+
+      # Optional: Slack-compatible webhook posted to when a ping fails.
+      # SUPAWAKE_WEBHOOK_URL: ${SUPAWAKE_WEBHOOK_URL}
