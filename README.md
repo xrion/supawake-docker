@@ -63,7 +63,9 @@ For each project with a `table` configured, `supawake` sends an HTTP `GET` to:
 https://<your-ref>.supabase.co/rest/v1/<table>?select=*&limit=1
 ```
 
-…with your key in the `apikey` header (legacy anon JWTs are additionally sent as `Authorization: Bearer …`; see [API keys](#api-keys)). A **200** response means the project is alive. Anything else is reported as a failure. An empty result (`[]`) still counts as success — the query ran, which is the whole point.
+…with your key in the `apikey` header (legacy anon JWTs are additionally sent as `Authorization: Bearer …`; see [API keys](#api-keys)). Any **2xx** response means the project is alive. Anything else is reported as a failure. An empty result (`[]`) still counts as success — the query ran, which is the whole point.
+
+Note that a healthy read here commonly answers **206 Partial Content**, not 200: PostgREST returns 206 for a range-limited query (`limit=1`) whenever the page it returned may not be the whole collection. Treating only 200 as success reports a perfectly healthy database as a failure.
 
 **Why a table read specifically.** Supabase pauses free-tier projects based on *database* inactivity. This request goes through PostgREST to Postgres, which evaluates your row-level security policies inside the database — real activity that resets the timer. Endpoints like `/auth/v1/health` return a 200 without ever querying Postgres, so pinging them produces a green check while the database still pauses.
 
@@ -92,6 +94,15 @@ create policy "anon can read keepalive"
   for select
   to anon
   using (true);
+
+-- Supabase grants these by default, but restore them explicitly in case they
+-- were revoked: without the grant the policy alone still yields HTTP 403.
+grant usage on schema public to anon;
+grant select on public.keepalive to anon;
+
+-- PostgREST answers from an in-memory schema cache; without this reload a
+-- table created seconds ago still returns 404 / PGRST205.
+notify pgrst, 'reload schema';
 ```
 
 It holds one meaningless row and grants anon `select` only — no insert, update, or delete.
@@ -149,7 +160,8 @@ SUPABASE_2_TABLE=keepalive
 | `SUPABASE_<n>_KEY` | Anon public key or publishable key. **Required** |
 | `SUPABASE_<n>_TABLE` | Table to read on each ping. Without it the ping falls back to the auth health check and **will not** prevent auto-pause |
 | `SUPAWAKE_TABLE` | Table for every project that has no `SUPABASE_<n>_TABLE` of its own |
-| `SUPAWAKE_INTERVAL` | Cron schedule used by `supawake start` |
+| `SUPAWAKE_INTERVAL` | Cron schedule used by `supawake start`. Defaults to `0 0 */3 * *` |
+| `SUPAWAKE_WEBHOOK_URL` | Slack-compatible webhook posted to when a ping fails. Setting it enables notifications |
 
 **`SUPABASE_<n>_TABLE` is what keeps the database awake.** Omit it and every
 ping stops at the auth endpoint, which answers `200` without ever reaching
@@ -160,6 +172,35 @@ Values are trimmed, and a pair of surrounding quotes is stripped, because
 container platforms often store them that way. A key carrying a stray quote or
 newline is rejected by Supabase with a `401` that looks exactly like a wrong
 key.
+
+### Running in Docker / Coolify
+
+```bash
+docker compose up -d --build
+```
+
+`docker-compose.yml` in this repository runs `supawake start`, which stays alive
+and pings on `SUPAWAKE_INTERVAL`. Provide the `SUPABASE_*` variables through
+Coolify's environment settings or a local `.env`.
+
+Checklist for a deployment that actually keeps a database awake:
+
+1. The [keepalive table](#setting-up-a-keepalive-table) exists in every project,
+   with the RLS select policy and the grants — see `supabase-sql-config.md`.
+2. `SUPABASE_<n>_URL` and `SUPABASE_<n>_KEY` are set, numbered from 1 with no
+   gaps in the pairs. A missing half of a pair aborts startup with a named error.
+3. `SUPABASE_<n>_TABLE` (or `SUPAWAKE_TABLE`) is set. **Without it the ping
+   never touches Postgres and the project pauses anyway**, even though the run
+   looks green.
+4. The key is the *anon public* / *publishable* key — never `service_role`.
+5. `restart: unless-stopped` is on, so the container survives host restarts.
+6. Run `docker compose logs -f supawake` once after deploying: the first ping
+   runs immediately at startup, so a misconfiguration shows up in seconds
+   rather than three days later.
+
+With no projects configured, `supawake start` now exits with status 1 and a
+message. It used to exit 0, which read as success to Docker and Coolify and
+produced a silent restart loop.
 
 ### API keys
 
@@ -176,6 +217,8 @@ Use the *anon public* / *publishable* key, never `service_role`.
 ### Notifications (optional)
 
 Set `notifications.enabled` to `true` and provide a `webhookUrl` (Slack-compatible) to receive a simple `{ text: "…" }` POST whenever one or more pings fail.
+
+In environment mode, set `SUPAWAKE_WEBHOOK_URL` — its presence enables notifications.
 
 ## Running on GitHub Actions
 
@@ -249,8 +292,20 @@ from its schema cache without touching the database, so this never counts as
 activity. Create the table and confirm the name.
 
 **`HTTP 403`** — the table exists but row-level security denies `anon` the
-`select`. Add the policy from
+`select`. Add the policy *and* the grants from
 [Setting up a keepalive table](#setting-up-a-keepalive-table).
+
+**`HTTP 206`** — this is a success, not a failure. PostgREST answers a
+range-limited read with `206 Partial Content`. supawake accepts any 2xx.
+
+**The container restarts in a loop with no output** — no projects were found in
+the environment. Check that the variables are named `SUPABASE_1_URL` /
+`SUPABASE_1_KEY` exactly, numbered from 1, and that they are attached to the
+running service rather than only to the build step.
+
+**Everything is green but the project still paused** — the pings are hitting
+`/auth/v1/health`, which never reaches Postgres. Set `SUPABASE_<n>_TABLE`. The
+output flags this with `— auth only, DB not pinged`.
 
 ## License
 

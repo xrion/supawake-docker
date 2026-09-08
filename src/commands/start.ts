@@ -15,8 +15,28 @@ export async function startCommand(opts: { interval?: string }): Promise<void> {
   }
 
   if (config.projects.length === 0) {
-    console.log(chalk.yellow('No projects configured. Run "supawake add" first.'));
-    return;
+    /*
+     * Exit non-zero. Returning quietly made the container exit 0, which reads
+     * as "finished successfully" to Docker, Coolify and systemd - they restart
+     * it forever with nothing in the logs explaining why nothing is pinged.
+     */
+    console.error(
+      chalk.red(
+        '\u2717 No projects configured. Set SUPABASE_1_URL and SUPABASE_1_KEY\n' +
+          '  (plus SUPABASE_1_TABLE) in the environment, or run "supawake add".',
+      ),
+    );
+    process.exit(1);
+  }
+
+  const untabled = config.projects.filter((project) => !project.table);
+  if (untabled.length > 0) {
+    console.log(
+      chalk.yellow(
+        `\u26a0 ${untabled.map((p) => p.name).join(', ')}: no table configured - ` +
+          'pings will stop at the auth endpoint and will NOT prevent auto-pause.',
+      ),
+    );
   }
 
   console.log(chalk.bold(`supawake started`));

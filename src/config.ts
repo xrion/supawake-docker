@@ -118,6 +118,8 @@ function loadConfigFromEnvironment(): Config | null {
     return null;
   }
 
+  const webhookUrl = readEnvironmentValue('SUPAWAKE_WEBHOOK_URL');
+
   return {
     projects,
     settings: {
@@ -125,12 +127,31 @@ function loadConfigFromEnvironment(): Config | null {
         readEnvironmentValue('SUPAWAKE_INTERVAL') ||
         DEFAULT_CONFIG.settings.defaultInterval,
 
+      /*
+       * Environment mode had notifications hardcoded off, which made them
+       * unreachable for every Docker / Coolify deployment.
+       */
       notifications: {
-        enabled: false,
-        webhookUrl: '',
+        enabled: webhookUrl !== undefined,
+        webhookUrl: webhookUrl ?? '',
       },
     },
   };
+}
+
+/**
+ * Whether Supawake is running from environment variables rather than from the
+ * config file.
+ *
+ * Checking SUPABASE_1_URL alone was wrong: projects may legitimately start at
+ * any number, so a container configured with only SUPABASE_2_* looked like CLI
+ * mode and "supawake add" would write the environment-derived projects out to
+ * disk.
+ */
+export function isEnvironmentConfigured(): boolean {
+  return Object.keys(process.env).some((key) =>
+    /^SUPABASE_\d+_(URL|KEY)$/.test(key),
+  );
 }
 
 /**
@@ -238,7 +259,7 @@ export function addProject(project: Project): Config {
    * If the configuration comes from environment variables,
    * don't attempt to overwrite it.
    */
-  if (!process.env.SUPABASE_1_URL) {
+  if (!isEnvironmentConfigured()) {
     saveConfig(config);
   }
 
@@ -265,7 +286,7 @@ export function removeProject(name: string): Config {
    * Environment based configurations are read-only.
    * They must be modified through Coolify.
    */
-  if (!process.env.SUPABASE_1_URL) {
+  if (!isEnvironmentConfigured()) {
     saveConfig(config);
   }
 
