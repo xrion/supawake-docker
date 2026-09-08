@@ -1,14 +1,13 @@
 import chalk from 'chalk';
 import { loadConfig } from '../config';
-import { pingAll } from '../ping';
+import { explainStatus, pingAll } from '../ping';
 import { notifyFailures } from '../notify';
 import { PingResult } from '../types';
 
 export function formatResult(r: PingResult): string {
   const tag = r.ok ? chalk.green('✓ OK  ') : chalk.red('✗ FAIL');
-  const detail = r.ok
-    ? chalk.gray(`${r.status} in ${r.durationMs}ms`)
-    : chalk.red(r.error ?? `HTTP ${r.status}`);
+  const failure = r.error ?? [`HTTP ${r.status}`, r.detail].filter(Boolean).join(' — ');
+  const detail = r.ok ? chalk.gray(`${r.status} in ${r.durationMs}ms`) : chalk.red(failure);
   const retried = r.attempts > 1 ? chalk.yellow(` (${r.attempts} attempts)`) : '';
   // A pass against the auth fallback says nothing about the database, so never
   // let it render as an unqualified green tick.
@@ -24,7 +23,13 @@ export async function pingCommand(): Promise<void> {
   }
   console.log(chalk.bold(`Pinging ${config.projects.length} project(s)…`));
   const results = await pingAll(config.projects);
-  for (const r of results) console.log(formatResult(r));
+  for (const r of results) {
+    console.log(formatResult(r));
+
+    // A bare status leaves the operator guessing; name the thing to go and fix.
+    const hint = r.ok ? undefined : explainStatus(r.status, r.project);
+    if (hint) console.log(chalk.gray(`         ↳ ${hint}`));
+  }
 
   await notifyFailures(results, config.settings.notifications);
 
@@ -41,8 +46,9 @@ export async function pingCommand(): Promise<void> {
     console.log(
       chalk.yellow(
         `\nWarning: ${noTable.join(', ')} have no "table" configured, so their pings never reach\n` +
-          `Postgres and will not prevent auto-pause. Set one with "supawake add" or by adding\n` +
-          `"table": "keepalive" to the project in your config.`,
+          `Postgres and will not prevent auto-pause. Set one with "supawake add", by adding\n` +
+          `"table": "keepalive" to the project in your config, or — when running in Docker or\n` +
+          `Coolify — with SUPABASE_<n>_TABLE=keepalive (or SUPAWAKE_TABLE=keepalive for all).`,
       ),
     );
   }
