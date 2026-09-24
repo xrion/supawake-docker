@@ -1,4 +1,4 @@
-import { PingResult, Project } from './types';
+import { PingResult, Project, StepResult } from './types';
 
 /**
  * Backoff before each retry.
@@ -9,8 +9,8 @@ import { PingResult, Project } from './types';
 const RETRY_DELAYS_MS = [500, 2000];
 
 /**
- * A table read goes through PostgREST to Postgres, which is what keeps a
- * free-tier project from auto-pausing.
+ * A table read goes through PostgREST to Postgres, which counts as database
+ * activity.
  *
  * The auth health endpoint is only a fallback for projects with no table
  * configured: it proves the project answers, but generates no database
@@ -26,13 +26,6 @@ export function pingUrl(project: Project): string {
   return `${base}/rest/v1/${encodeURIComponent(
     project.table,
   )}?select=*&limit=1`;
-}
-
-interface Attempt {
-  ok: boolean;
-  status?: number;
-  error?: string;
-  detail?: string;
 }
 
 /**
@@ -53,12 +46,17 @@ async function readFailureDetail(res: Response): Promise<string | undefined> {
         message?: string;
         msg?: string;
         error?: string;
+        error_description?: string;
         hint?: string;
         code?: string;
       };
 
       const message =
-        parsed.message ?? parsed.msg ?? parsed.error ?? parsed.hint;
+        parsed.message ??
+        parsed.msg ??
+        parsed.error_description ??
+        parsed.error ??
+        parsed.hint;
 
       if (message) {
         return parsed.code ? `${parsed.code}: ${message}` : message;
@@ -79,7 +77,27 @@ async function readFailureDetail(res: Response): Promise<string | undefined> {
 export function explainStatus(
   status: number | undefined,
   project: Project,
+  step = 'read',
 ): string | undefined {
+  if (step === 'sign-in') {
+    if (status === 400) {
+      return 'sign-in refused - check SUPABASE_n_EMAIL / SUPABASE_n_PASSWORD, and that the user exists and its email is confirmed';
+    }
+    if (status === 429) {
+      return 'Supabase Auth rate-limited the sign-in - ping less often';
+    }
+  }
+
+  if (step === 'rpc') {
+    if (status === 404) {
+      return `function "${project.rpc}" was not found - create it (see supabase-sql-config.md), then run ` +
+        "notify pgrst, 'reload schema';";
+    }
+    if (status === 401 || status === 403) {
+      return `the caller may not execute "${project.rpc}" - grant execute on it to anon and authenticated`;
+    }
+  }
+
   if (status === 401) {
     return isPublishableKey(project.anonKey)
       ? 'the publishable key was rejected - check it belongs to this project and has not been revoked'
@@ -88,7 +106,7 @@ export function explainStatus(
 
   if (status === 403) {
     return project.table
-      ? `anon may not select from "${project.table}" - grant it a row-level security select policy`
+      ? `the caller may not select from "${project.table}" - grant it a row-level security select policy`
       : 'the project refused the request';
   }
 
@@ -143,8 +161,24 @@ function isPublishableKey(key: string): boolean {
   return key.startsWith('sb_publishable_');
 }
 
-async function attemptPing(
-  project: Project,
+interface Request {
+  method: 'GET' | 'POST';
+  url: string;
+  headers: Record<string, string>;
+  body?: unknown;
+}
+
+interface Attempt {
+  ok: boolean;
+  status?: number;
+  error?: string;
+  detail?: string;
+  /** Parsed response body, kept only for successful requests that return one. */
+  json?: unknown;
+}
+
+async function attemptRequest(
+  request: Request,
   timeoutMs: number,
 ): Promise<Attempt> {
   const controller = new AbortController();
@@ -154,53 +188,32 @@ async function attemptPing(
   }, timeoutMs);
 
   try {
-    const publishableKey = isPublishableKey(project.anonKey);
-
-    const headers: Record<string, string> = {
-      /*
-       * Both legacy anon keys and new publishable keys are sent
-       * through the apikey header.
-       */
-      apikey: project.anonKey,
-    };
-
-    /*
-     * Legacy anon keys are JWTs.
-     *
-     * The old Supabase API expected the JWT to also be supplied
-     * as the Authorization Bearer token.
-     *
-     * New sb_publishable_* keys are opaque API keys, NOT JWTs,
-     * so we must NOT send:
-     *
-     * Authorization: Bearer sb_publishable_...
-     *
-     * because that can result in HTTP 401.
-     */
-    if (!publishableKey) {
-      headers.Authorization = `Bearer ${project.anonKey}`;
-    }
-
-    const res = await fetch(pingUrl(project), {
-      method: 'GET',
-      headers,
+    const res = await fetch(request.url, {
+      method: request.method,
+      headers:
+        request.body === undefined
+          ? request.headers
+          : { ...request.headers, 'Content-Type': 'application/json' },
+      body: request.body === undefined ? undefined : JSON.stringify(request.body),
       signal: controller.signal,
     });
 
     /*
-     * Any 2xx means the request reached PostgREST and the query ran.
+     * Any 2xx means the request reached its service and succeeded.
      *
      * It must NOT be narrowed to 200: PostgREST answers a range-limited read
      * such as "?select=*&limit=1" with 206 Partial Content whenever the page
-     * it returned may not be the whole collection. A keepalive table pinged
-     * with limit=1 hits that case, so a strict 200 check reports a perfectly
-     * healthy database as a failure.
+     * it returned may not be the whole collection, and sign-out answers 204.
      */
     if (res.ok) {
-      return {
-        ok: true,
-        status: res.status,
-      };
+      let json: unknown;
+      try {
+        const text = await res.text();
+        json = text ? JSON.parse(text) : undefined;
+      } catch {
+        json = undefined;
+      }
+      return { ok: true, status: res.status, json };
     }
 
     return {
@@ -221,41 +234,152 @@ async function attemptPing(
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
-export async function pingProject(
-  project: Project,
-  timeoutMs = 15000,
-): Promise<PingResult> {
-  const start = Date.now();
-
-  let attempt: Attempt = {
-    ok: false,
-    error: 'no attempt made',
-  };
+async function runStep(
+  step: string,
+  request: Request,
+  timeoutMs: number,
+): Promise<StepResult & { json?: unknown }> {
+  let attempt: Attempt = { ok: false, error: 'no attempt made' };
 
   for (let i = 0; i <= RETRY_DELAYS_MS.length; i++) {
-    attempt = await attemptPing(project, timeoutMs);
+    attempt = await attemptRequest(request, timeoutMs);
 
-    if (
-      attempt.ok ||
-      !isTransient(attempt) ||
-      i === RETRY_DELAYS_MS.length
-    ) {
-      return {
-        project,
-        ...attempt,
-        attempts: i + 1,
-        durationMs: Date.now() - start,
-      };
+    if (attempt.ok || !isTransient(attempt) || i === RETRY_DELAYS_MS.length) {
+      return { step, ...attempt, attempts: i + 1 };
     }
 
     await sleep(RETRY_DELAYS_MS[i]);
   }
 
   /* istanbul ignore next - loop always returns */
+  return { step, ...attempt, attempts: RETRY_DELAYS_MS.length + 1 };
+}
+
+/**
+ * Headers for a PostgREST or GoTrue call.
+ *
+ * Both legacy anon keys and new publishable keys go in the apikey header.
+ * The Authorization header carries the signed-in user's access token when
+ * there is one, which makes Postgres run the query as "authenticated".
+ * Without a user, legacy anon JWTs are also sent as the bearer token; new
+ * sb_publishable_* keys are opaque, NOT JWTs, and sending one as a bearer
+ * token results in HTTP 401.
+ */
+function headersFor(
+  project: Project,
+  accessToken?: string,
+): Record<string, string> {
+  const headers: Record<string, string> = { apikey: project.anonKey };
+
+  if (accessToken) {
+    headers.Authorization = `Bearer ${accessToken}`;
+  } else if (!isPublishableKey(project.anonKey)) {
+    headers.Authorization = `Bearer ${project.anonKey}`;
+  }
+
+  return headers;
+}
+
+/**
+ * Generate one burst of activity for a project.
+ *
+ * Supabase pauses a free project when it sees too little *user* database
+ * activity over a week ("a few user requests to the database each day"), so
+ * a single read every few days is not enough. Each ping therefore sends every
+ * kind of traffic the project is configured for:
+ *
+ *   1. sign-in   - a password login, as a real visitor would (writes to
+ *                  auth.sessions, auth.refresh_tokens and last_sign_in_at)
+ *   2. read      - a PostgREST select against the keepalive table
+ *   3. rpc       - a heartbeat function that writes a row
+ *   4. sign-out  - ends the session created in step 1
+ *
+ * A failed sign-in does not stop the rest: the read and RPC still run as anon,
+ * so the database keeps getting traffic while the credentials get fixed.
+ */
+export async function pingProject(
+  project: Project,
+  timeoutMs = 15000,
+): Promise<PingResult> {
+  const start = Date.now();
+  const base = project.url.replace(/\/$/, '');
+  const steps: StepResult[] = [];
+  let accessToken: string | undefined;
+
+  const record = (result: StepResult & { json?: unknown }): unknown => {
+    const { json, ...step } = result;
+    steps.push(step);
+    return json;
+  };
+
+  if (project.email && project.password) {
+    const json = record(
+      await runStep(
+        'sign-in',
+        {
+          method: 'POST',
+          url: `${base}/auth/v1/token?grant_type=password`,
+          headers: headersFor(project),
+          body: { email: project.email, password: project.password },
+        },
+        timeoutMs,
+      ),
+    ) as { access_token?: string } | undefined;
+
+    accessToken = json?.access_token;
+  }
+
+  if (project.table || !project.rpc) {
+    record(
+      await runStep(
+        project.table ? 'read' : 'health',
+        { method: 'GET', url: pingUrl(project), headers: headersFor(project, accessToken) },
+        timeoutMs,
+      ),
+    );
+  }
+
+  if (project.rpc) {
+    record(
+      await runStep(
+        'rpc',
+        {
+          method: 'POST',
+          url: `${base}/rest/v1/rpc/${encodeURIComponent(project.rpc)}`,
+          headers: headersFor(project, accessToken),
+          body: {},
+        },
+        timeoutMs,
+      ),
+    );
+  }
+
+  if (accessToken) {
+    // scope=local ends only this session, not the user's sessions elsewhere.
+    record(
+      await runStep(
+        'sign-out',
+        {
+          method: 'POST',
+          url: `${base}/auth/v1/logout?scope=local`,
+          headers: headersFor(project, accessToken),
+        },
+        timeoutMs,
+      ),
+    );
+  }
+
+  const failed = steps.find((step) => !step.ok);
+  const summary = failed ?? steps[steps.length - 1];
+
   return {
     project,
-    ...attempt,
-    attempts: RETRY_DELAYS_MS.length + 1,
+    steps,
+    ok: failed === undefined,
+    status: summary.status,
+    error: summary.error,
+    detail: summary.detail,
+    attempts: steps.reduce((total, step) => total + step.attempts, 0),
     durationMs: Date.now() - start,
   };
 }

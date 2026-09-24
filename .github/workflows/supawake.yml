@@ -2,8 +2,11 @@ name: supawake
 
 on:
   schedule:
-    # Every 3 days at 06:00 UTC
-    - cron: '0 6 */3 * *'
+    # Every 6 hours. Supabase wants "a few user requests to the database each
+    # day"; every 3 days let projects pause with every run green.
+    # GitHub disables scheduled workflows after 60 days without a commit, so
+    # the Docker deployment is the primary pinger and this is a backup.
+    - cron: '23 */6 * * *'
   workflow_dispatch:
 
 jobs:
@@ -35,3 +38,6 @@ jobs:
 
       - name: Ping all projects
         run: node dist/index.js ping
+        env:
+          # Optional: lets the run restore a project that got paused anyway.
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}

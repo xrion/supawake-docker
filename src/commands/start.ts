@@ -3,7 +3,14 @@ import cron from 'node-cron';
 import { loadConfig } from '../config';
 import { pingAll } from '../ping';
 import { notifyFailures } from '../notify';
-import { formatResult } from './ping';
+import { formatResult, wakePaused } from './ping';
+
+/**
+ * Schedules that fire less than once a day. Supabase wants "a few user
+ * requests to the database each day"; these are the old supawake defaults,
+ * still common in saved configs and Coolify environments.
+ */
+const SPARSE_SCHEDULES = ['0 0 */3 * *', '0 6 */3 * *', '0 0 * * 0', '0 0 */7 * *'];
 
 export async function startCommand(opts: { interval?: string }): Promise<void> {
   const config = loadConfig();
@@ -29,7 +36,16 @@ export async function startCommand(opts: { interval?: string }): Promise<void> {
     process.exit(1);
   }
 
-  const untabled = config.projects.filter((project) => !project.table);
+  if (SPARSE_SCHEDULES.includes(schedule.trim())) {
+    console.log(
+      chalk.yellow(
+        `\u26a0 schedule "${schedule}" runs less than once a day - Supabase can still pause ` +
+          'the project. Use "17 */4 * * *" (the default) or set SUPAWAKE_INTERVAL.',
+      ),
+    );
+  }
+
+  const untabled = config.projects.filter((project) => !project.table && !project.rpc);
   if (untabled.length > 0) {
     console.log(
       chalk.yellow(
@@ -42,12 +58,18 @@ export async function startCommand(opts: { interval?: string }): Promise<void> {
   console.log(chalk.bold(`supawake started`));
   console.log(chalk.gray(`  schedule: ${schedule}`));
   console.log(chalk.gray(`  projects: ${config.projects.length}`));
+  console.log(
+    chalk.gray(
+      `  auto-restore: ${config.settings.accessToken ? 'on' : 'off (set SUPABASE_ACCESS_TOKEN)'}`,
+    ),
+  );
   console.log(chalk.gray(`  press Ctrl+C to stop\n`));
 
   const run = async () => {
     const ts = new Date().toISOString();
     console.log(chalk.bold(`[${ts}] pinging…`));
     const latest = loadConfig();
+    await wakePaused(latest.projects, latest.settings.accessToken);
     const results = await pingAll(latest.projects);
     for (const r of results) console.log(formatResult(r));
     await notifyFailures(results, latest.settings.notifications);

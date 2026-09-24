@@ -20,6 +20,8 @@ export function listCommand(): void {
         ? `    Table: ${p.table}`
         : chalk.yellow('    Table: (none) — auth check only, will not prevent auto-pause'),
     );
+    console.log(`    RPC:   ${p.rpc ?? chalk.gray('(none) — no write on ping')}`);
+    console.log(`    User:  ${p.email ?? chalk.gray('(none) — pings run as anon')}`);
   }
   console.log(chalk.gray(`\nConfig: ${CONFIG_PATH}`));
   console.log(chalk.gray(`Default schedule: ${config.settings.defaultInterval}`));

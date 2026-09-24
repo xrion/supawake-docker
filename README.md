@@ -2,7 +2,7 @@
 
 Keep your free-tier Supabase projects from auto-pausing. `supawake` is a tiny CLI that pings the Supabase REST API on a schedule so your databases stay warm.
 
-Supabase pauses free-tier projects after ~7 days of inactivity. `supawake` prevents that with a single scheduled HTTP request — run it locally, in a cron job, or as a GitHub Action.
+Supabase pauses a free-tier project when it sees too little *user database activity* over a week — its docs say ["a few user requests to the database each day"](https://supabase.com/docs/guides/platform/free-project-pausing) is enough. `supawake` generates that activity every few hours: it can sign in as a real user, read a table, write a heartbeat row and sign out — and, with a Management API token, restore a project that got paused anyway. Run it in Docker/Coolify, a cron job, or a GitHub Action.
 
 ## Install
 
@@ -31,7 +31,7 @@ supawake status
 supawake ping
 
 # 4. Or run continuously on a schedule
-supawake start --interval "0 0 */3 * *"
+supawake start --interval "17 */4 * * *"
 ```
 
 ## Commands
@@ -47,7 +47,9 @@ supawake start --interval "0 0 */3 * *"
 
 ### `supawake start`
 
-Starts a long-running process that pings every project according to the given cron expression. Defaults to the value in `settings.defaultInterval` (every 3 days at midnight: `0 0 */3 * *`).
+Starts a long-running process that pings every project according to the given cron expression. Defaults to the value in `settings.defaultInterval` (every 4 hours: `17 */4 * * *`).
+
+Earlier versions defaulted to every 3 days, and that default was saved into `config.json`. It is too sparse — projects paused with every ping green — so `start` warns when it sees it. Change `defaultInterval` in your config, or `SUPAWAKE_INTERVAL` in Docker/Coolify.
 
 ```bash
 supawake start                         # use default schedule from config
@@ -56,6 +58,32 @@ supawake start -i "0 */12 * * *"       # every 12 hours
 ```
 
 ## How pings work
+
+Each ping is a short burst of the traffic a real user generates, in this order —
+every step is optional and runs only when configured:
+
+| Step | Request | Enabled by |
+|---|---|---|
+| `sign-in` | `POST /auth/v1/token?grant_type=password` — writes a session and `last_sign_in_at` | `SUPABASE_<n>_EMAIL` + `_PASSWORD` |
+| `read` | `GET /rest/v1/<table>?select=*&limit=1` | `SUPABASE_<n>_TABLE` |
+| `rpc` | `POST /rest/v1/rpc/<function>` — the heartbeat writes a row | `SUPABASE_<n>_RPC` |
+| `sign-out` | `POST /auth/v1/logout?scope=local` | after a successful sign-in |
+
+After a sign-in, the read and the write run as the `authenticated` user. If the
+sign-in fails, they still run as `anon`, so the database keeps getting traffic
+while you fix the credentials. The output lists every request:
+
+```
+✓ OK   discoursparfait      sign-in 200, read 206, rpc 200, sign-out 204 in 412ms
+```
+
+Set up the table, the heartbeat function and the user with
+[`supabase-sql-config.md`](supabase-sql-config.md). With `SUPABASE_ACCESS_TOKEN`
+set, supawake also checks each project through the Management API before
+pinging and restores it if Supabase paused it — pings alone can't wake a paused
+database.
+
+### The read
 
 For each project with a `table` configured, `supawake` sends an HTTP `GET` to:
 
@@ -122,11 +150,14 @@ Configuration lives at `~/.config/supawake/config.json`:
       "name": "anyigba",
       "url": "https://xyz.supabase.co",
       "anonKey": "eyJ...",
-      "table": "keepalive"
+      "table": "keepalive",
+      "rpc": "supawake_heartbeat",
+      "email": "supawake@example.com",
+      "password": "..."
     }
   ],
   "settings": {
-    "defaultInterval": "0 0 */3 * *",
+    "defaultInterval": "17 */4 * * *",
     "notifications": {
       "enabled": false,
       "webhookUrl": ""
@@ -146,6 +177,10 @@ SUPABASE_1_NAME=discoursparfait          # optional, defaults to supabase-1
 SUPABASE_1_URL=https://xxxxx.supabase.co
 SUPABASE_1_KEY=eyJ...                    # anon public key, or sb_publishable_...
 SUPABASE_1_TABLE=keepalive               # anon-readable table to select from
+SUPABASE_1_RPC=supawake_heartbeat        # function that writes a heartbeat row
+SUPABASE_1_EMAIL=supawake@example.com    # optional: sign in as this user
+SUPABASE_1_PASSWORD=...
+SUPABASE_ACCESS_TOKEN=sbp_...            # optional: restore paused projects
 
 SUPABASE_2_NAME=project2
 SUPABASE_2_URL=https://yyyyy.supabase.co
@@ -160,7 +195,12 @@ SUPABASE_2_TABLE=keepalive
 | `SUPABASE_<n>_KEY` | Anon public key or publishable key. **Required** |
 | `SUPABASE_<n>_TABLE` | Table to read on each ping. Without it the ping falls back to the auth health check and **will not** prevent auto-pause |
 | `SUPAWAKE_TABLE` | Table for every project that has no `SUPABASE_<n>_TABLE` of its own |
-| `SUPAWAKE_INTERVAL` | Cron schedule used by `supawake start`. Defaults to `0 0 */3 * *` |
+| `SUPABASE_<n>_RPC` | Heartbeat function called on each ping, e.g. `supawake_heartbeat`. Writes a row |
+| `SUPAWAKE_RPC` | Heartbeat function for every project that has no `SUPABASE_<n>_RPC` of its own |
+| `SUPABASE_<n>_EMAIL` / `_PASSWORD` | A dedicated Auth user to sign in as on each ping. Set both or neither |
+| `SUPABASE_<n>_REF` | Project ref, only needed for auto-restore when the URL is a custom domain |
+| `SUPABASE_ACCESS_TOKEN` | Personal access token. Enables auto-restore of paused projects |
+| `SUPAWAKE_INTERVAL` | Cron schedule used by `supawake start`. Defaults to `17 */4 * * *` (every 4 hours) |
 | `SUPAWAKE_WEBHOOK_URL` | Slack-compatible webhook posted to when a ping fails. Setting it enables notifications |
 
 **`SUPABASE_<n>_TABLE` is what keeps the database awake.** Omit it and every
@@ -229,8 +269,8 @@ name: supawake
 
 on:
   schedule:
-    # Every 3 days at 06:00 UTC
-    - cron: '0 6 */3 * *'
+    # Every 6 hours
+    - cron: '23 */6 * * *'
   workflow_dispatch:
 
 jobs:
@@ -303,9 +343,26 @@ the environment. Check that the variables are named `SUPABASE_1_URL` /
 `SUPABASE_1_KEY` exactly, numbered from 1, and that they are attached to the
 running service rather than only to the build step.
 
-**Everything is green but the project still paused** — the pings are hitting
-`/auth/v1/health`, which never reaches Postgres. Set `SUPABASE_<n>_TABLE`. The
-output flags this with `— auth only, DB not pinged`.
+**Everything is green but the project still paused** — in order of likelihood:
+
+1. The schedule is too sparse. One ping every 3 days (the old default) is below
+   Supabase's "a few user requests to the database each day". Use the new
+   default `17 */4 * * *`; `start` warns about the old one.
+2. The pings only hit `/auth/v1/health`, which never reaches Postgres. Set
+   `SUPABASE_<n>_TABLE`. The output flags this with `— auth only, DB not pinged`.
+3. Reads alone may not be enough. Add the heartbeat write (`SUPABASE_<n>_RPC`)
+   and a sign-in (`SUPABASE_<n>_EMAIL` / `_PASSWORD`).
+4. The container was not running. Check `docker compose logs supawake`, and
+   `select * from public.keepalive_log order by pinged_at desc` for gaps.
+
+Set `SUPABASE_ACCESS_TOKEN` as a safety net: if a project pauses anyway, the
+next run restores it.
+
+**`sign-in: HTTP 400`** — wrong email or password, the user is not confirmed
+(tick *Auto Confirm User* when creating it), or email sign-in is disabled.
+
+**`read: HTTP 403` only after adding a user** — the keepalive policy only covers
+`anon`. Re-run step 1 of `supabase-sql-config.md`, which adds `authenticated`.
 
 ## License
 

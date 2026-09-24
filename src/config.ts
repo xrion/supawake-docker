@@ -8,10 +8,21 @@ export const CONFIG_DIR = path.join(os.homedir(), '.config', 'supawake');
 
 export const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
 
+/**
+ * Every 4 hours, at minute 17.
+ *
+ * Supabase pauses a free project that sees too little user database activity
+ * over a week; its docs say "a few user requests to the database each day" is
+ * enough. The old default, one read every 3 days, fell short of that and
+ * projects paused with every ping green. Minute 17 keeps runs off the top of
+ * the hour, when scheduled traffic everywhere piles up.
+ */
+export const DEFAULT_INTERVAL = '17 */4 * * *';
+
 const DEFAULT_CONFIG: Config = {
   projects: [],
   settings: {
-    defaultInterval: '0 0 */3 * *',
+    defaultInterval: DEFAULT_INTERVAL,
     notifications: {
       enabled: false,
       webhookUrl: '',
@@ -59,6 +70,12 @@ function readEnvironmentValue(name: string): string | undefined {
  * touching Postgres and therefore does NOT prevent free-tier auto-pause.
  * SUPAWAKE_TABLE sets the table for every project that has no explicit one.
  *
+ * SUPABASE_n_RPC names a heartbeat function that writes a row on each ping
+ * (SUPAWAKE_RPC for all projects). SUPABASE_n_EMAIL / SUPABASE_n_PASSWORD sign
+ * in as a real Auth user before querying. SUPABASE_n_REF overrides the project
+ * ref for custom domains. SUPABASE_ACCESS_TOKEN enables auto-restore of paused
+ * projects through the Management API.
+ *
  * This is particularly useful when running Supawake
  * inside Docker / Coolify.
  */
@@ -69,9 +86,11 @@ function loadConfigFromEnvironment(): Config | null {
 
   const defaultTable = readEnvironmentValue('SUPAWAKE_TABLE');
 
+  const defaultRpc = readEnvironmentValue('SUPAWAKE_RPC');
+
   const projectNumbers = environmentKeys
     .map((key) => {
-      const match = key.match(/^SUPABASE_(\d+)_(NAME|URL|KEY|TABLE)$/);
+      const match = key.match(/^SUPABASE_(\d+)_(NAME|URL|KEY|TABLE|RPC|EMAIL|PASSWORD|REF)$/);
 
       if (!match) {
         return null;
@@ -98,6 +117,21 @@ function loadConfigFromEnvironment(): Config | null {
       readEnvironmentValue(`SUPABASE_${projectNumber}_TABLE`) ??
       defaultTable;
 
+    const rpc = readEnvironmentValue(`SUPABASE_${projectNumber}_RPC`) ?? defaultRpc;
+
+    const email = readEnvironmentValue(`SUPABASE_${projectNumber}_EMAIL`);
+
+    const password = readEnvironmentValue(`SUPABASE_${projectNumber}_PASSWORD`);
+
+    const ref = readEnvironmentValue(`SUPABASE_${projectNumber}_REF`);
+
+    if (Boolean(email) !== Boolean(password)) {
+      throw new Error(
+        `Incomplete sign-in for SUPABASE_${projectNumber}. Set both ` +
+          `SUPABASE_${projectNumber}_EMAIL and SUPABASE_${projectNumber}_PASSWORD, or neither.`,
+      );
+    }
+
     if (!url || !anonKey) {
       throw new Error(
         `Incomplete configuration for SUPABASE_${projectNumber}. ` +
@@ -111,6 +145,9 @@ function loadConfigFromEnvironment(): Config | null {
       url,
       anonKey,
       ...(table ? { table } : {}),
+      ...(rpc ? { rpc } : {}),
+      ...(email && password ? { email, password } : {}),
+      ...(ref ? { ref } : {}),
     });
   }
 
@@ -135,6 +172,8 @@ function loadConfigFromEnvironment(): Config | null {
         enabled: webhookUrl !== undefined,
         webhookUrl: webhookUrl ?? '',
       },
+
+      accessToken: readEnvironmentValue('SUPABASE_ACCESS_TOKEN'),
     },
   };
 }
@@ -212,6 +251,11 @@ export function loadConfig(): Config {
       settings: {
         ...DEFAULT_CONFIG.settings,
         ...(parsed.settings ?? {}),
+
+        // The token is a secret; letting the environment supply it keeps it
+        // out of a config file that tends to get copied around.
+        accessToken:
+          readEnvironmentValue('SUPABASE_ACCESS_TOKEN') ?? parsed.settings?.accessToken,
 
         notifications: {
           ...DEFAULT_CONFIG.settings.notifications,
