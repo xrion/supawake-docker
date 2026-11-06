@@ -745,7 +745,8 @@ def find_resume_target(state: dict[str, Any], mail: InboundEmail) -> tuple[str, 
             if conversation_id:
                 return conversation_id, state["conversations"].get(conversation_id, {})
 
-    thread = state["threads"].get(normalize_subject(mail.subject))
+    thread_key = normalize_subject(mail.subject)
+    thread = state["threads"].get(thread_key) if thread_key else None
     if thread and thread.get("conversation_id") and _thread_is_recent(thread):
         conversation_id = thread["conversation_id"]
         return conversation_id, state["conversations"].get(conversation_id, {})
@@ -823,10 +824,11 @@ def process_email(config: dict[str, Any], mail: InboundEmail, dry_run: bool = Fa
             "resumed": True,
             "inbox_conversation_id": inbox_id,
         }
-        state["threads"][thread] = {
-            "conversation_id": conversation_id,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }
+        if thread:
+            state["threads"][thread] = {
+                "conversation_id": conversation_id,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
         save_state(state)
         url = public_conversation_url(config, conversation_id)
         if config.get("gateway", {}).get("reply", True):
@@ -888,10 +890,11 @@ def process_email(config: dict[str, Any], mail: InboundEmail, dry_run: bool = Fa
         "thread": thread,
         "inbox_conversation_id": inbox_id,
     }
-    state["threads"][thread] = {
-        "conversation_id": primary,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
+    if thread:
+        state["threads"][thread] = {
+            "conversation_id": primary,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
     if inbox_id:
         state["inbox"][inbox_id] = {"message_id": mail.message_id, "subject": mail.subject}
     save_state(state)
