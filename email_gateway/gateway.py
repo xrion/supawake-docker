@@ -720,8 +720,7 @@ def resolve_targets(config: dict[str, Any], mail: InboundEmail) -> list[tuple[Pa
 
 
 def build_prompt(mail: InboundEmail, directives: dict[str, str], workspace: Path,
-                 workspace_name: str | None = None, focus: str | None = None,
-                 inbox_conversation_id: str | None = None) -> str:
+                 workspace_name: str | None = None, focus: str | None = None) -> str:
     lines = [
         "[Demande reçue par email]",
         f"De : {mail.sender}",
@@ -733,8 +732,6 @@ def build_prompt(mail: InboundEmail, directives: dict[str, str], workspace: Path
         lines.append("Pièces jointes : " + ", ".join(mail.attachments))
     if directives:
         lines.append("Consignes détectées : " + ", ".join(f"{k}={v}" for k, v in directives.items()))
-    if inbox_conversation_id:
-        lines.append(f"Demande brute archivée : {inbox_conversation_id}")
     lines += [
         "",
         "--- Corps du message ---",
@@ -757,7 +754,7 @@ def build_prompt(mail: InboundEmail, directives: dict[str, str], workspace: Path
     return "\n".join(lines)
 
 
-def create_conversation(config: dict[str, Any], mail: InboundEmail, prompt: str,
+def create_conversation(config: dict[str, Any], mail: InboundEmail, prompt: str | None,
                         workspace: Path, title: str, run: bool = True,
                         origin: str = "email") -> dict[str, Any]:
     settings = _request(config, "GET", "/api/settings", headers={"X-Expose-Secrets": "encrypted"})
@@ -796,12 +793,13 @@ def create_conversation(config: dict[str, Any], mail: InboundEmail, prompt: str,
             "workspace": str(workspace),
             "origin": origin,
         },
-        "initial_message": {
+    }
+    if prompt is not None:
+        payload["initial_message"] = {
             "role": "user",
             "content": [{"type": "text", "text": prompt}],
             "run": run,
-        },
-    }
+        }
     created = _request(config, "POST", "/api/conversations", payload)
     if title:
         try:
@@ -829,10 +827,36 @@ def inbox_workspace(config: dict[str, Any]) -> Path:
     return path
 
 
-def archive_email(config: dict[str, Any], mail: InboundEmail) -> str | None:
+def build_inbox_redirect(mail: InboundEmail, references: list[dict[str, Any]],
+                         header: str | None = None) -> str:
+    lines = [
+        "[Archive — aucune action dans cette conversation]",
+        f"Email reçu de : {mail.sender}",
+        f"Date : {mail.date}",
+        f"Objet : {mail.subject or '(sans objet)'}",
+        "",
+        header or (
+            "Cette conversation sert uniquement de trace : aucun travail n'est effectué ici, "
+            "elle ne fait que renvoyer vers la conversation de travail."
+        ),
+        "Le travail est réalisé dans :",
+    ]
+    for ref in references:
+        lines.append(f"- {ref['project']} : {ref['url']}")
+        lines.append(f"  Conversation ID : {ref['conversation_id']}")
+        lines.append(f"  Reprise : [conv:{short_id(ref['conversation_id'])}]")
+    lines += [
+        "",
+        "Pour intervenir, répondez à l'email d'origine ou ouvrez la conversation de travail ci-dessus.",
+    ]
+    return "\n".join(lines)
+
+
+def archive_email(config: dict[str, Any], mail: InboundEmail, redirect: str) -> str | None:
     """Keep the untouched raw request in the Email workspace.
 
-    The archive conversation never runs: it is a mailbox record, not work.
+    The archive conversation is created empty and receives a single redirect
+    message with ``run=False``: it is a mailbox record, never work.
     """
     if not _routing(config).get("archive_inbox_conversations", True):
         return None
@@ -842,12 +866,11 @@ def archive_email(config: dict[str, Any], mail: InboundEmail) -> str | None:
     dated.mkdir(parents=True, exist_ok=True)
     (dated / f"{safe_id}.eml").write_bytes(mail.raw)
 
+    title = f"📥 {mail.subject} (archive)" if mail.subject else f"📥 Email de {mail.sender} (archive)"
     try:
-        created = create_conversation(
-            config, mail, build_prompt(mail, mail.directives(), workspace, "Email"),
-            workspace, f"📥 {mail.subject}" if mail.subject else f"📥 Email de {mail.sender}",
-            run=False, origin="email-inbox",
-        )
+        created = create_conversation(config, mail, None, workspace, title,
+                                      run=False, origin="email-inbox")
+        append_message(config, created["id"], redirect, run=False)
         return created["id"]
     except Exception as exc:
         LOG.warning("Could not create inbox conversation (raw .eml kept): %s", exc)
@@ -987,15 +1010,13 @@ def find_resume_target(state: dict[str, Any], mail: InboundEmail) -> tuple[str, 
     return None
 
 
-def build_followup_prompt(mail: InboundEmail, inbox_conversation_id: str | None) -> str:
+def build_followup_prompt(mail: InboundEmail) -> str:
     lines = [
         "[Suite d'une conversation existante — nouvelle demande reçue par email]",
         f"De : {mail.sender}",
         f"Date : {mail.date}",
         f"Objet : {mail.subject}",
     ]
-    if inbox_conversation_id:
-        lines.append(f"Demande brute archivée : {inbox_conversation_id}")
     lines += [
         "",
         "--- Nouveau message ---",
@@ -1033,11 +1054,23 @@ def process_email(config: dict[str, Any], mail: InboundEmail, dry_run: bool = Fa
             "title": title,
         }
 
-    inbox_id = archive_email(config, mail)
-
     if resume:
         conversation_id, item = resume
-        append_message(config, conversation_id, build_followup_prompt(mail, inbox_id))
+        append_message(config, conversation_id, build_followup_prompt(mail))
+        url = public_conversation_url(config, conversation_id)
+        ref = {
+            "project": Path(item.get("workspace") or "Conversation").name or "Conversation",
+            "url": url,
+            "conversation_id": conversation_id,
+        }
+        inbox_id = archive_email(
+            config, mail,
+            build_inbox_redirect(
+                mail, [ref],
+                header=("Votre message a été ajouté à la conversation existante : "
+                        "aucun nouveau travail n'est lancé ici."),
+            ),
+        )
         entry = state["conversations"].setdefault(conversation_id, {})
         entry.update({
             "message_id": mail.message_id,
@@ -1063,8 +1096,9 @@ def process_email(config: dict[str, Any], mail: InboundEmail, dry_run: bool = Fa
                 "conversation_id": conversation_id,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
+        if inbox_id:
+            state["inbox"][inbox_id] = {"message_id": mail.message_id, "subject": mail.subject}
         save_state(state)
-        url = public_conversation_url(config, conversation_id)
         if config.get("gateway", {}).get("reply", True):
             try:
                 send_email(
@@ -1079,6 +1113,7 @@ def process_email(config: dict[str, Any], mail: InboundEmail, dry_run: bool = Fa
                         "Répondez à cet email pour poursuivre le même travail.\n"
                     ),
                     in_reply_to=mail.message_id,
+                    html_body=resume_email_html(mail, item, conversation_id, url),
                 )
             except Exception as exc:
                 LOG.error("Reply failed: %s", exc)
@@ -1091,7 +1126,6 @@ def process_email(config: dict[str, Any], mail: InboundEmail, dry_run: bool = Fa
         prompt = build_prompt(
             mail, directives, workspace, project_name,
             focus=project_name if multi else None,
-            inbox_conversation_id=inbox_id,
         )
         conv_title = f"📧 [{project_name}] {mail.subject}" if multi else title
         created = create_conversation(config, mail, prompt, workspace, conv_title)
@@ -1112,6 +1146,7 @@ def process_email(config: dict[str, Any], mail: InboundEmail, dry_run: bool = Fa
         }
         LOG.info("Conversation %s created in %s", created["id"], workspace)
 
+    inbox_id = archive_email(config, mail, build_inbox_redirect(mail, launched))
     primary = launched[0]["conversation_id"]
     state["messages"][mail.message_id] = primary
     state["processed"][mail.message_id] = {
@@ -1154,6 +1189,7 @@ def process_email(config: dict[str, Any], mail: InboundEmail, dry_run: bool = Fa
                     "Vous recevrez un nouveau message à la fin de chaque conversation.\n"
                 ),
                 in_reply_to=mail.message_id,
+                html_body=ack_email_html(mail, launched, inbox_id),
             )
         except Exception as exc:
             LOG.error("Reply failed: %s", exc)
@@ -1210,11 +1246,12 @@ def notify_finished(config: dict[str, Any]) -> list[dict[str, Any]]:
             except Exception as exc:
                 LOG.warning("No final response for %s: %s", conversation_id, exc)
 
+        url = public_conversation_url(config, conversation_id)
         body = (
             f"La conversation « {item.get('subject', '')} » est terminée ({status}).\n\n"
             f"Espace de travail : {item.get('workspace', '')}\n"
             f"Conversation ID : {conversation_id}\n"
-            f"Lien : {public_conversation_url(config, conversation_id)}\n\n"
+            f"Lien : {url}\n\n"
             "--- Réponse de l'agent ---\n"
             f"{answer or '(pas de réponse texte)'}\n\n"
             "--- Pour reprendre ce travail ---\n"
@@ -1227,6 +1264,7 @@ def notify_finished(config: dict[str, Any]) -> list[dict[str, Any]]:
                 subject=f"Re: [conv:{short_id(conversation_id)}] {item.get('subject', '')}",
                 body=body,
                 in_reply_to=item.get("message_id"),
+                html_body=finished_email_html(item, conversation_id, status, answer, url),
             )
             item["notified"] = True
             results.append({"status": "notified", "conversation_id": conversation_id})

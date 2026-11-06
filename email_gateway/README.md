@@ -57,7 +57,15 @@ found in the message body are matched, and the default workspace
 
 The raw message is archived as `.eml` under the `Email` workspace and, when
 `routing.archive_inbox_conversations` is true, an inbox record conversation is
-created there without running an agent.
+created there. That record never runs an agent: it contains a single redirect
+message pointing to the working conversation(s), so work happens exactly once.
+
+## Emails
+
+Acknowledgements and completion emails are sent as `multipart/alternative`
+with both a plain-text and an HTML part. The HTML part is rendered from the
+agent's Markdown answer (headings, lists, code blocks, tables, links) with
+inline styles so it displays correctly in common mail clients.
 
 ## Replying
 
