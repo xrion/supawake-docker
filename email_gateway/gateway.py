@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import email
 import email.policy
+import html
 import imaplib
 import json
 import logging
@@ -278,8 +279,154 @@ def mark_seen(config: dict[str, Any], uid: str) -> None:
         client.store(uid, "+FLAGS", "\\Seen")
 
 
-def send_email(config: dict[str, Any], to: str, subject: str, body: str,
-               in_reply_to: str | None = None) -> None:
+_HTML_WRAPPER = """<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>{title}</title></head>
+<body style="margin:0;padding:0;background:#f3f4f6;">
+  <div style="max-width:720px;margin:0 auto;padding:24px;background:#ffffff;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;color:#1f2328;">
+    {inner}
+    <p style="margin:28px 0 0;padding-top:12px;border-top:1px solid #e5e7eb;font-size:12px;color:#8b949e;">
+      Email gateway OpenHands
+    </p>
+  </div>
+</body>
+</html>"""
+
+_INLINE_CODE = ('<code style="background:#f6f8fa;border-radius:4px;padding:1px 4px;'
+                'font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;">{}</code>')
+
+
+def _inline_html(text: str) -> str:
+    """Inline Markdown on already-escaped text."""
+    text = re.sub(r"`([^`\n]+)`", lambda m: _INLINE_CODE.format(m.group(1)), text)
+    text = re.sub(r"\*\*([^*\n]+)\*\*", r"<strong>\1</strong>", text)
+    text = re.sub(r"(?<![\w*])__([^_\n]+)__(?![\w_])", r"<strong>\1</strong>", text)
+    text = re.sub(r"(?<![\w*])\*([^*\n]+)\*(?![\w*])", r"<em>\1</em>", text)
+    text = re.sub(r"\[([^\]]+)\]\((https?://[^\s)]+)\)", r'<a href="\2" style="color:#0969da;">\1</a>', text)
+    return text
+
+
+def _table_html(header: list[str], rows: list[list[str]]) -> str:
+    cell = "border:1px solid #d0d7de;padding:6px 10px;vertical-align:top;"
+    head = "".join(f'<th style="{cell}background:#f6f8fa;text-align:left;">{_inline_html(html.escape(c))}</th>'
+                   for c in header)
+    body = "".join(
+        "<tr>" + "".join(f'<td style="{cell}">{_inline_html(html.escape(c))}</td>' for c in row) + "</tr>"
+        for row in rows
+    )
+    return (f'<table style="border-collapse:collapse;margin:0 0 14px;width:100%;font-size:14px;">'
+            f"<tr>{head}</tr>{body}</table>")
+
+
+def markdown_to_html(text: str) -> str:
+    """Small Markdown renderer producing email-friendly inline-styled HTML."""
+    lines = text.replace("\r\n", "\n").split("\n")
+    out: list[str] = []
+    paragraph: list[str] = []
+
+    def flush() -> None:
+        if paragraph:
+            joined = "<br>".join(_inline_html(html.escape(line)) for line in paragraph)
+            out.append(f'<p style="margin:0 0 12px;">{joined}</p>')
+            paragraph.clear()
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if re.match(r"^\s*```", line):
+            flush()
+            i += 1
+            code: list[str] = []
+            while i < len(lines) and not re.match(r"^\s*```", lines[i]):
+                code.append(lines[i])
+                i += 1
+            i += 1
+            out.append(
+                '<pre style="margin:0 0 14px;padding:12px;background:#f6f8fa;border:1px solid #e5e7eb;'
+                'border-radius:6px;overflow-x:auto;font-size:13px;line-height:1.5;"><code>'
+                f"{html.escape(chr(10).join(code))}</code></pre>"
+            )
+            continue
+
+        heading = re.match(r"^(#{1,6})\s+(.+?)\s*#*\s*$", line)
+        if heading:
+            flush()
+            level = min(len(heading.group(1)) + 1, 6)
+            size = {2: "20px", 3: "17px", 4: "16px", 5: "15px", 6: "14px"}[level]
+            out.append(
+                f'<h{level} style="margin:18px 0 8px;font-size:{size};line-height:1.3;">'
+                f"{_inline_html(html.escape(heading.group(2)))}</h{level}>"
+            )
+            i += 1
+            continue
+
+        if re.match(r"^\s*([-*_])(\s*\1){2,}\s*$", line):
+            flush()
+            out.append('<hr style="border:0;border-top:1px solid #e5e7eb;margin:20px 0;">')
+            i += 1
+            continue
+
+        if re.match(r"^\s*[-*+]\s+", line):
+            flush()
+            items = []
+            while i < len(lines) and re.match(r"^\s*[-*+]\s+", lines[i]):
+                items.append(_inline_html(html.escape(re.sub(r"^\s*[-*+]\s+", "", lines[i]))))
+                i += 1
+            out.append('<ul style="margin:0 0 12px;padding-left:22px;">'
+                       + "".join(f'<li style="margin:2px 0;">{item}</li>' for item in items) + "</ul>")
+            continue
+
+        if re.match(r"^\s*\d+[.)]\s+", line):
+            flush()
+            items = []
+            while i < len(lines) and re.match(r"^\s*\d+[.)]\s+", lines[i]):
+                items.append(_inline_html(html.escape(re.sub(r"^\s*\d+[.)]\s+", "", lines[i]))))
+                i += 1
+            out.append('<ol style="margin:0 0 12px;padding-left:22px;">'
+                       + "".join(f'<li style="margin:2px 0;">{item}</li>' for item in items) + "</ol>")
+            continue
+
+        if line.lstrip().startswith(">"):
+            flush()
+            quote: list[str] = []
+            while i < len(lines) and lines[i].lstrip().startswith(">"):
+                quote.append(re.sub(r"^\s*>\s?", "", lines[i]))
+                i += 1
+            out.append('<blockquote style="margin:0 0 12px;padding:4px 0 4px 12px;'
+                       'border-left:3px solid #d0d7de;color:#57606a;">'
+                       + markdown_to_html("\n".join(quote)) + "</blockquote>")
+            continue
+
+        if "|" in line and i + 1 < len(lines) and re.match(r"^\s*\|?[\s:|-]+\|[\s:|-]+$", lines[i + 1]):
+            flush()
+            header = [c.strip() for c in line.strip().strip("|").split("|")]
+            rows: list[list[str]] = []
+            i += 2
+            while i < len(lines) and "|" in lines[i] and lines[i].strip():
+                rows.append([c.strip() for c in lines[i].strip().strip("|").split("|")])
+                i += 1
+            out.append(_table_html(header, rows))
+            continue
+
+        if not line.strip():
+            flush()
+            i += 1
+            continue
+
+        paragraph.append(line)
+        i += 1
+
+    flush()
+    return "\n".join(out)
+
+
+def html_email(title: str, inner: str) -> str:
+    return _HTML_WRAPPER.format(title=html.escape(title), inner=inner)
+
+
+def build_email_message(config: dict[str, Any], to: str, subject: str, body: str,
+                        html_body: str | None = None,
+                        in_reply_to: str | None = None) -> EmailMessage:
     smtp_cfg = config["smtp"]
     msg = EmailMessage()
     msg["From"] = smtp_cfg.get("from") or smtp_cfg["user"]
@@ -290,6 +437,15 @@ def send_email(config: dict[str, Any], to: str, subject: str, body: str,
         msg["In-Reply-To"] = in_reply_to
         msg["References"] = in_reply_to
     msg.set_content(body)
+    if html_body:
+        msg.add_alternative(html_body, subtype="html")
+    return msg
+
+
+def send_email(config: dict[str, Any], to: str, subject: str, body: str,
+               in_reply_to: str | None = None, html_body: str | None = None) -> None:
+    smtp_cfg = config["smtp"]
+    msg = build_email_message(config, to, subject, body, html_body, in_reply_to)
 
     with (smtplib.SMTP_SSL(smtp_cfg["host"], int(smtp_cfg["port"]), timeout=30,
                            context=ssl.create_default_context())
