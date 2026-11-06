@@ -1,0 +1,22 @@
+{
+  "name": "email-gateway",
+  "version": "1.0.0",
+  "description": "IMAP mailbox to OpenHands conversations gateway",
+  "automation": {
+    "schema_version": "openhands.automation.plugin.v1",
+    "entrypoint": {
+      "runner": "script",
+      "command": "python3 automation_entry.py"
+    },
+    "config_schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    },
+    "suggested_trigger": {
+      "type": "cron",
+      "schedule": "*/2 * * * *",
+      "timezone": "Europe/Brussels"
+    }
+  }
+}

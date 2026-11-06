@@ -1,0 +1,82 @@
+{
+  "imap": {
+    "host": "imap.hostinger.com",
+    "port": 993,
+    "user": "ohands@newstack.be"
+  },
+  "smtp": {
+    "host": "smtp.hostinger.com",
+    "port": 587,
+    "user": "ohands@newstack.be",
+    "from": "OpenHands <ohands@newstack.be>",
+    "starttls": true
+  },
+  "security": {
+    "allowed_senders": [
+      "ohands@newstack.be"
+    ],
+    "allowed_domains": [
+      "newstack.be"
+    ],
+    "subject_prefix": "",
+    "allow_any_sender": false,
+    "ignore_self": false
+  },
+  "routing": {
+    "projects_root": "/home/openhands/workspace/projects",
+    "default_workspace": "/home/openhands/workspace/projects/general",
+    "inbox_workspace": "/home/openhands/workspace/projects/email",
+    "archive_inbox_conversations": true,
+    "create_missing_workspaces": true,
+    "general_keywords": [
+      "agent canvas",
+      "agent-canvas",
+      "gateway email",
+      "passerelle email",
+      "installation de la plateforme openhands",
+      "installer openhands",
+      "installation openhands",
+      "plateforme openhands",
+      "openhands platform"
+    ],
+    "workspace_aliases": {
+      "général": "/home/openhands/workspace/projects/general",
+      "general": "/home/openhands/workspace/projects/general",
+      "supawake": "/home/openhands/workspace/projects/platform",
+      "super week": "/home/openhands/workspace/projects/platform",
+      "superweek": "/home/openhands/workspace/projects/platform",
+      "pbdr homes": "/home/openhands/workspace/projects/pbdr-homes",
+      "pbdr home": "/home/openhands/workspace/projects/pbdr-homes",
+      "colivinghub": "/home/openhands/workspace/projects/ColivingHub",
+      "co-living hub": "/home/openhands/workspace/projects/ColivingHub",
+      "coliving": "/home/openhands/workspace/projects/ColivingHub",
+      "etiquettes": "/home/openhands/workspace/projects/pbdr-etiquettes-vusion",
+      "étiquettes": "/home/openhands/workspace/projects/pbdr-etiquettes-vusion",
+      "vusion": "/home/openhands/workspace/projects/pbdr-etiquettes-vusion",
+      "robotics cell": "/home/openhands/workspace/projects/RoboticsCell",
+      "robotic cell": "/home/openhands/workspace/projects/RoboticsCell",
+      "robotics infrastructure": "/home/openhands/workspace/projects/RoboticsCell",
+      "robotics infra": "/home/openhands/workspace/projects/RoboticsCell",
+      "ns robotics": "/home/openhands/workspace/projects/NS-Robotics-Engineering",
+      "ns engineering": "/home/openhands/workspace/projects/NS-Robotics-Engineering",
+      "j6 welder": "/home/openhands/workspace/projects/J6-WelderRobot",
+      "j6 engineering": "/home/openhands/workspace/projects/J6-WelderRobot",
+      "j6": "/home/openhands/workspace/projects/J6-WelderRobot",
+      "newstack agency": "/home/openhands/workspace/projects/NewstackAgency",
+      "ns landing page": "/home/openhands/workspace/projects/NewstackAgency",
+      "ns landingpage": "/home/openhands/workspace/projects/NewstackAgency"
+    }
+  },
+  "gateway": {
+    "api_base": "http://127.0.0.1:18000",
+    "public_base_url": "",
+    "poll_interval_seconds": 300,
+    "reply": true,
+    "startup_note": false,
+    "startup_note_to": "",
+    "startup_note_min_hours": 6
+  },
+  "agent": {
+    "max_iterations": 500
+  }
+}
