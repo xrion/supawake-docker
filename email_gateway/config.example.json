@@ -1,0 +1,44 @@
+{
+  "imap": {
+    "host": "imap.example.com",
+    "port": 993,
+    "user": "agent@example.com"
+  },
+  "smtp": {
+    "host": "smtp.example.com",
+    "port": 587,
+    "user": "agent@example.com",
+    "from": "OpenHands <agent@example.com>",
+    "starttls": true
+  },
+  "security": {
+    "allowed_senders": [
+      "vous@example.com"
+    ],
+    "allowed_domains": [],
+    "subject_prefix": "",
+    "allow_any_sender": false,
+    "ignore_self": true
+  },
+  "routing": {
+    "projects_root": "/home/openhands/workspace/projects",
+    "default_workspace": "/home/openhands/workspace/projects/general",
+    "inbox_workspace": "/home/openhands/workspace/projects/email",
+    "archive_inbox_conversations": true,
+    "create_missing_workspaces": true,
+    "general_keywords": [],
+    "workspace_aliases": {}
+  },
+  "gateway": {
+    "api_base": "http://127.0.0.1:18000",
+    "public_base_url": "",
+    "poll_interval_seconds": 300,
+    "reply": true,
+    "startup_note": false,
+    "startup_note_to": "",
+    "startup_note_min_hours": 6
+  },
+  "agent": {
+    "max_iterations": 500
+  }
+}
