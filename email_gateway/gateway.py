@@ -424,6 +424,84 @@ def html_email(title: str, inner: str) -> str:
     return _HTML_WRAPPER.format(title=html.escape(title), inner=inner)
 
 
+def _code(value: str) -> str:
+    return _INLINE_CODE.format(html.escape(str(value)))
+
+
+def _refs_list_html(references: list[dict[str, Any]]) -> str:
+    items = []
+    for ref in references:
+        items.append(
+            '<li style="margin:8px 0;">'
+            f'<strong>{html.escape(ref["project"])}</strong><br>'
+            f'<a href="{html.escape(ref["url"])}" style="color:#0969da;">{html.escape(ref["url"])}</a><br>'
+            f'<span style="color:#57606a;font-size:13px;">Conversation {_code(ref["conversation_id"])}'
+            f' &middot; reprise {_code("[conv:" + short_id(ref["conversation_id"]) + "]")}</span>'
+            "</li>"
+        )
+    return '<ul style="margin:0 0 16px;padding-left:22px;">' + "".join(items) + "</ul>"
+
+
+def ack_email_html(mail: InboundEmail, launched: list[dict[str, Any]],
+                   inbox_id: str | None = None) -> str:
+    inner = (
+        '<h2 style="margin:0 0 12px;font-size:20px;">Demande reçue</h2>'
+        f'<p style="margin:0 0 12px;">Objet : <strong>{html.escape(mail.subject or "(sans objet)")}</strong></p>'
+        f'<p style="margin:0 0 12px;">{len(launched)} conversation(s) OpenHands ont été lancée(s) :</p>'
+        + _refs_list_html(launched)
+        + (f'<p style="margin:0 0 12px;color:#57606a;">Demande brute archivée : {_code(inbox_id)}</p>'
+           if inbox_id else "")
+        + "<p style=\"margin:0 0 12px;\">Répondez à cet email en gardant l'identifiant "
+        + _code("[conv:...]")
+        + " dans l'objet pour reprendre une conversation. Vous recevrez un nouveau message "
+          "à la fin de chacune.</p>"
+    )
+    return html_email("Demande reçue", inner)
+
+
+def resume_email_html(mail: InboundEmail, item: dict[str, Any],
+                      conversation_id: str, url: str) -> str:
+    ref = {
+        "project": Path(item.get("workspace") or "Conversation").name or "Conversation",
+        "url": url,
+        "conversation_id": conversation_id,
+    }
+    inner = (
+        '<h2 style="margin:0 0 12px;font-size:20px;">Message ajouté</h2>'
+        f'<p style="margin:0 0 12px;">Objet : <strong>{html.escape(mail.subject or "(sans objet)")}</strong></p>'
+        '<p style="margin:0 0 12px;">Votre message a été ajouté à la conversation existante.</p>'
+        + _refs_list_html([ref])
+        + '<p style="margin:0 0 12px;">Répondez à cet email pour poursuivre le même travail.</p>'
+    )
+    return html_email("Message ajouté", inner)
+
+
+def finished_email_html(item: dict[str, Any], conversation_id: str, status: str,
+                        answer: str, url: str) -> str:
+    color = "#1a7f37" if status == "finished" else "#9a6700"
+    answer_html = (markdown_to_html(answer) if answer else
+                   '<p style="margin:0 0 12px;color:#57606a;">(pas de réponse texte)</p>')
+    inner = (
+        '<h2 style="margin:0 0 12px;font-size:20px;">Conversation terminée</h2>'
+        f'<p style="margin:0 0 12px;">Objet : <strong>{html.escape(item.get("subject") or "(sans objet)")}</strong></p>'
+        f'<p style="margin:0 0 12px;">Statut : <strong style="color:{color};">{html.escape(status)}</strong></p>'
+        f'<p style="margin:0 0 12px;">Espace de travail : {_code(item.get("workspace", ""))}</p>'
+        f'<p style="margin:0 0 12px;">Lien : <a href="{html.escape(url)}" style="color:#0969da;">'
+        f"{html.escape(url)}</a></p>"
+        f'<p style="margin:0 0 12px;">Conversation {_code(conversation_id)} &middot; reprise '
+        f'{_code("[conv:" + short_id(conversation_id) + "]")}</p>'
+        '<hr style="border:0;border-top:1px solid #e5e7eb;margin:20px 0;">'
+        "<h3 style=\"margin:18px 0 8px;font-size:17px;\">Réponse de l'agent</h3>"
+        + answer_html
+        + '<hr style="border:0;border-top:1px solid #e5e7eb;margin:20px 0;">'
+        + '<p style="margin:0 0 12px;">Pour reprendre ce travail, répondez simplement à cet email '
+          "en gardant l'identifiant "
+        + _code("[conv:...]")
+        + " dans l'objet.</p>"
+    )
+    return html_email("Conversation terminée", inner)
+
+
 def build_email_message(config: dict[str, Any], to: str, subject: str, body: str,
                         html_body: str | None = None,
                         in_reply_to: str | None = None) -> EmailMessage:
